@@ -9,7 +9,3 @@ __pycache__/
 *.pyc
 .env
 config.yaml
-# Track these for automation:
-!data/candidates.json
-!data/trade_plan.json
-!data/watchlist.json

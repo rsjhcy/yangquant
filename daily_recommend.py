@@ -137,20 +137,6 @@ def run_close_phase(style: str, top_n: int):
           f"平均涨跌: {market.get('avg_pct_chg','-')}")
 
     logger.info(f"\n候选已保存到 data/candidates.json")
-
-    # 也保存交易计划 (给 auto_trade.py 使用)
-    trade_plan = {
-        "date": str(date.today()),
-        "style": style if style != "both" else "aggressive",
-        "capital": 100000,
-        "balanced": result.get("balanced", []),
-        "aggressive": result.get("aggressive", []),
-    }
-    tp_path = Path("data/trade_plan.json")
-    with open(tp_path, "w", encoding="utf-8") as f:
-        json.dump(trade_plan, f, ensure_ascii=False, indent=2)
-    logger.info(f"交易计划已保存 → {tp_path}")
-
     logger.info(f"明天 9:20 运行: python daily_recommend.py --phase auction")
 
 

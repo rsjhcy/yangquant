@@ -40,6 +40,8 @@ class EmailSender:
         self.sender = self.cfg.sender
         self.password = self.cfg.password
         self.receiver = self.cfg.receiver
+        # Support multiple receivers (comma-separated)
+        self.receivers = [r.strip() for r in self.receiver.split(",") if r.strip()] if self.receiver else []
 
     def send_recommendation(
         self,
@@ -68,45 +70,41 @@ class EmailSender:
         return self._send(subject, html)
 
     def _send(self, subject: str, html: str) -> bool:
-        """底层发送"""
-        if not self.sender or not self.password or not self.receiver:
+        """底层发送（支持多个收件人，逗号分隔）"""
+        if not self.sender or not self.password or not self.receivers:
             logger.error(
-                "邮件未配置! 请在 config.yaml 中设置 email 相关参数:"
-                "\n  sender: 发件邮箱"
-                "\n  password: SMTP授权码"
-                "\n  receiver: 收件邮箱"
+                "邮件未配置! config.yaml 中设置: sender/password/receiver(多个用逗号分隔)"
             )
             return False
 
-        msg = MIMEMultipart("alternative")
         from email.header import Header
         from email.utils import formataddr
 
-        msg["Subject"] = Header(subject, "utf-8")
-        msg["From"] = formataddr(("羊量量化", self.sender))
-        msg["To"] = self.receiver
+        all_ok = True
+        for recipient in self.receivers:
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = Header(subject, "utf-8")
+                msg["From"] = formataddr(("羊量量化", self.sender))
+                msg["To"] = recipient
+                msg.attach(MIMEText(html, "html", "utf-8"))
 
-        msg.attach(MIMEText(html, "html", "utf-8"))
+                if self.smtp_port == 465:
+                    with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=15) as smtp:
+                        smtp.login(self.sender, self.password)
+                        smtp.sendmail(self.sender, recipient, msg.as_string())
+                else:
+                    with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=15) as smtp:
+                        smtp.starttls()
+                        smtp.login(self.sender, self.password)
+                        smtp.sendmail(self.sender, recipient, msg.as_string())
 
-        try:
-            if self.smtp_port == 465:
-                # SSL
-                with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=15) as smtp:
-                    smtp.login(self.sender, self.password)
-                    smtp.sendmail(self.sender, self.receiver, msg.as_string())
-            else:
-                # STARTTLS
-                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=15) as smtp:
-                    smtp.starttls()
-                    smtp.login(self.sender, self.password)
-                    smtp.sendmail(self.sender, self.receiver, msg.as_string())
+                logger.info(f"邮件已发送 → {recipient}")
+            except Exception as e:
+                logger.error(f"发送到 {recipient} 失败: {e}")
+                all_ok = False
 
-            logger.info(f"邮件已发送 → {self.receiver}")
-            return True
-
-        except Exception as e:
-            logger.error(f"邮件发送失败: {e}")
-            return False
+        return all_ok
 
     @staticmethod
     def _sell_plan_html(plan: dict, plan_str: str) -> str:

@@ -1,0 +1,54 @@
+# ============================================
+# 羊量量化平台 - 用户配置文件
+# ============================================
+
+# --- 数据存储路径 ---
+data:
+  root_dir: "./data"                 # 数据根目录
+  cache_enabled: true                # 是否启用内存缓存
+  cache_ttl: 3600                    # 缓存过期时间(秒)
+
+# --- 数据源配置 ---
+sources:
+  primary: akshare                   # 主数据源: akshare | tushare
+  tushare_token: ""                  # tushare API token
+
+# --- 回测默认参数 ---
+backtest:
+  initial_capital: 1000000           # 初始资金(元)
+  commission_rate: 0.00025           # 佣金费率(万2.5)
+  stamp_duty: 0.001                  # 印花税(卖出0.1%)
+  min_commission: 5.0                # 最低佣金(元)
+  slippage: 0.0001                   # 滑点(万1)
+  benchmark: "000300"                # 基准指数(沪深300)
+
+# --- 风险控制 ---
+risk:
+  max_position_pct: 0.2              # 单只股票最大仓位
+  max_positions: 20                  # 最大持仓数
+  stop_loss_pct: 0.08                # 止损线(-8%)
+  stop_profit_pct: 0.30              # 止盈线(+30%)
+
+# --- 邮件通知 (用于每日选股推荐) ---
+# QQ邮箱: smtp.qq.com, 端口465
+# 163邮箱: smtp.163.com, 端口465
+# ⚠ QQ邮箱需要授权码，不是登录密码!
+#   获取方式: QQ邮箱→设置→账户→POP3/SMTP服务→生成授权码
+email:
+  smtp_server: "smtp.qq.com"
+  smtp_port: 465
+  sender: "1281074210@qq.com"                          # 发件邮箱地址
+  password: "exbajkgtskquhebd"                        # SMTP授权码
+  receiver: "1281074210@qq.com"                        # 收件邮箱地址
+
+# --- 选股器 ---
+screener:
+  style: "both"                       # balanced | aggressive | both
+  top_n: 3                            # 每种风格推荐数量
+
+# --- 日志 ---
+logging:
+  level: INFO                        # DEBUG | INFO | WARNING | ERROR
+  file: "./logs/quant.log"
+  rotation: "10 MB"
+  retention: "30 days"

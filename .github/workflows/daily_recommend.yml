@@ -1,0 +1,61 @@
+name: 羊量每日选股
+
+on:
+  schedule:
+    # 北京时间 15:30 (UTC 07:30) — 收盘筛选
+    - cron: '30 7 * * 1-5'
+    # 北京时间 09:20 (UTC 01:20) — 竞价分析+发邮件
+    - cron: '20 1 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  recommend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: pip install -q pandas numpy scipy scikit-learn pyarrow pyyaml loguru click pydantic rich plotly akshare
+
+      - name: Write config
+        run: |
+          cat > config.yaml << 'YAML'
+          data:
+            root_dir: "./data"
+          sources:
+            primary: akshare
+          email:
+            smtp_server: "smtp.qq.com"
+            smtp_port: 465
+            sender: "${{ secrets.EMAIL_SENDER }}"
+            password: "${{ secrets.EMAIL_PASSWORD }}"
+            receiver: "${{ secrets.EMAIL_RECEIVER }}"
+          screener:
+            style: "both"
+            top_n: 3
+          logging:
+            level: "WARNING"
+            file: "./logs/quant.log"
+            rotation: "10 MB"
+            retention: "30 days"
+          YAML
+
+      - name: Pull latest candidates (auction phase)
+        run: git pull --rebase || true
+
+      - name: Run (auto-detect phase by time)
+        id: run
+        run: python daily_recommend.py --phase all --no-send 2>&1 || python daily_recommend.py --phase all
+
+      - name: Commit candidates (close phase)
+        if: github.event.schedule == '30 7 * * 1-5'
+        run: |
+          git config user.name "YangQuant Bot"
+          git config user.email "bot@yangquant.dev"
+          git add data/candidates.json data/watchlist.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "[bot] daily close screening $(date +%Y-%m-%d)"
+          git push || true

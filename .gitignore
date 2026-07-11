@@ -1,0 +1,10 @@
+data/daily/
+data/minute/
+data/financials/
+data/index/
+data/*.parquet
+data/backtest_cache.parquet
+logs/
+__pycache__/
+*.pyc
+.env

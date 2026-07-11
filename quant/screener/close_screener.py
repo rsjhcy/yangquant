@@ -13,6 +13,10 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+# 处理 np.bool 废弃问题
+if not hasattr(np, "bool"):
+    np.bool = np.bool_
+
 from quant.config import config as app_config
 
 
@@ -383,6 +387,113 @@ class CloseScreener:
             result[style] = picks[:n]
         return result
 
+    # ─── 趋势感知增强 ─────────────────────────
+    def _fetch_daily_history(self, symbols: List[str], days: int = 60) -> pd.DataFrame:
+        """获取一批股票的日线历史数据"""
+        from quant.data.sources import AkshareSource
+
+        end = date.today()
+        start = end - timedelta(days=days + 10)  # extra buffer
+        source = AkshareSource()
+
+        try:
+            df = source.get_daily(symbols, start, end)
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            logger.warning(f"获取历史数据失败: {e}")
+        return pd.DataFrame()
+
+    def _compute_trend_strength(self, hist_df: pd.DataFrame) -> Dict[str, float]:
+        """计算每只股票的趋势强度 = 近40日内收盘在MA20上方的天数占比"""
+        result = {}
+        if hist_df.empty:
+            return result
+
+        for sym, group in hist_df.groupby("symbol"):
+            group = group.sort_values("date").tail(40)
+            if len(group) < 20:
+                continue
+            close = group["close"].values
+            ma20 = pd.Series(close).rolling(20, min_periods=10).mean().values
+            above = np.sum(close[-20:] > ma20[-20:])  # last 20 valid comparisons
+            result[sym] = above / 20
+        return result
+
+    def _apply_trend_aware(
+        self,
+        picks: Dict[str, List[Dict]],
+        df: pd.DataFrame,
+    ) -> Dict[str, List[Dict]]:
+        """对初选结果应用趋势感知增强
+
+        如果某只股票处于强趋势中 (trend_strength > 0.7):
+        - 动量因子加权 → 不再惩罚高RSI和高开
+        - 调高总分 + 附加趋势标签
+        """
+        # 收集所有候选symbol
+        all_symbols = []
+        for style_picks in picks.values():
+            for p in style_picks:
+                all_symbols.append(p["symbol"])
+
+        if not all_symbols:
+            return picks
+
+        # 获取历史数据
+        unique_syms = list(set(all_symbols))
+        hist = self._fetch_daily_history(unique_syms)
+        if hist.empty:
+            logger.info("无历史数据，跳过趋势感知")
+            return picks
+
+        # 计算趋势强度
+        trend_map = self._compute_trend_strength(hist)
+        logger.info(f"趋势检测: {len(trend_map)} 只股票有数据")
+
+        # 应用到每个pick
+        for style, style_picks in picks.items():
+            for pick in style_picks:
+                sym = pick["symbol"]
+                ts = trend_map.get(sym, 0.5)
+
+                # 检查近20日收益
+                sym_hist = hist[hist["symbol"] == sym].sort_values("date")
+                if len(sym_hist) >= 21:
+                    ret_20d = (
+                        sym_hist["close"].iloc[-1] / sym_hist["close"].iloc[-21] - 1
+                    )
+                else:
+                    ret_20d = 0
+
+                pick["trend_strength"] = round(ts, 2)
+                pick["ret_20d"] = round(ret_20d, 4)
+
+                # ===== 趋势感知调整 =====
+                is_strong_trend = ts > 0.7 and ret_20d > 0.05
+
+                if is_strong_trend:
+                    # 动量加速奖金
+                    score_boost = 1.0 + min(ts - 0.7, 0.3)  # max +30%
+                    pick["score"] = round(pick["score"] * score_boost, 1)
+                    pick["momentum_score"] = round(pick["momentum_score"] * 1.2, 1)
+
+                    # 更新推荐理由
+                    if "趋势" in pick.get("reason", ""):
+                        pick["reason"] = pick["reason"].replace("趋势", "强趋势🔥")
+                    else:
+                        pick["reason"] = "强趋势🔥" + pick.get("reason", "")
+
+                    # 添加趋势标签
+                    pick["is_trending"] = True
+                    pick["trend_note"] = (
+                        f"强趋势股(强度{ts:.0%}): 持有至MA20下方再考虑卖出"
+                    )
+                else:
+                    pick["is_trending"] = False
+
+        return picks
+
     # ─── 完整筛选流程 ─────────────────────────
     def run(self, style: str = "both", top_n: int = 3) -> Dict:
         """一键运行收盘筛选
@@ -406,25 +517,41 @@ class CloseScreener:
         # 3. 打分
         scores = self.compute_scores(df, style)
 
-        # 4. 选Top
-        picks = self.select_top(scores, top_n)
+        # 4. 选Top（取多一些候选给趋势分析）
+        candidates_wide = self.select_top(scores, max(top_n * 3, 10))
 
-        # 5. 市场概况
+        # 5. 趋势感知增强
+        enhanced = self._apply_trend_aware(candidates_wide, df)
+
+        # 6. 重新按增强后得分排序，取Top N
+        final_picks = {}
+        for st in enhanced:
+            enhanced[st].sort(key=lambda x: x.get("score", 0), reverse=True)
+            final_picks[st] = enhanced[st][:top_n]
+
+        # 7. 市场概况
         market = self._market_summary(df)
 
         result = {
-            "balanced": picks.get("balanced", []),
-            "aggressive": picks.get("aggressive", []),
+            "balanced": final_picks.get("balanced", []),
+            "aggressive": final_picks.get("aggressive", []),
             "market": market,
             "timestamp": datetime.now().isoformat(),
         }
 
-        # 6. 保存到文件
+        # 8. 保存到文件
         self._save_candidates(result)
 
+        n_balanced = len(result["balanced"])
+        n_agg = len(result["aggressive"])
+
+        # 统计趋势股数量
+        n_trend_bal = sum(1 for p in result["balanced"] if p.get("is_trending"))
+        n_trend_agg = sum(1 for p in result["aggressive"] if p.get("is_trending"))
+
         logger.info(
-            f"筛选完成! 平衡型: {len(result['balanced'])}只, "
-            f"激进型: {len(result['aggressive'])}只"
+            f"筛选完成! 平衡型: {n_balanced}只({n_trend_bal}趋势) | "
+            f"激进型: {n_agg}只({n_trend_agg}趋势)"
         )
         return result
 

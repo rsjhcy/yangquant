@@ -51,11 +51,11 @@ jobs:
         id: run
         run: python daily_recommend.py --phase all --no-send 2>&1 || python daily_recommend.py --phase all
 
-      - name: Commit candidates (close phase)
+      - name: Commit results (close phase)
         if: github.event.schedule == '30 7 * * 1-5'
         run: |
           git config user.name "YangQuant Bot"
           git config user.email "bot@yangquant.dev"
-          git add data/candidates.json data/watchlist.json 2>/dev/null || true
+          git add data/candidates.json data/trade_plan.json data/watchlist.json 2>/dev/null || true
           git diff --staged --quiet || git commit -m "[bot] daily close screening $(date +%Y-%m-%d)"
           git push || true

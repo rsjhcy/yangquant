@@ -1,0 +1,76 @@
+{
+  "balanced": [
+    {
+      "symbol": "002415",
+      "name": "",
+      "close": "35.39",
+      "score": 73.01112114807668,
+      "momentum_score": 77.1,
+      "trend_score": 99.5,
+      "volume_score": 45.0,
+      "pct_chg_str": "+5.30%",
+      "reason": "动量+5.3%, 换手3.0%, 量比1.0"
+    },
+    {
+      "symbol": "600276",
+      "name": "",
+      "close": "55.61",
+      "score": 72.79947945310467,
+      "momentum_score": 76.2,
+      "trend_score": 100,
+      "volume_score": 45.0,
+      "pct_chg_str": "+3.96%",
+      "reason": "动量+4.0%, 换手3.0%, 量比1.0"
+    },
+    {
+      "symbol": "603259",
+      "name": "",
+      "close": "121.07",
+      "score": 71.9439305129556,
+      "momentum_score": 74.4,
+      "trend_score": 100,
+      "volume_score": 45.0,
+      "pct_chg_str": "-0.19%",
+      "reason": "动量-0.2%, 换手3.0%, 量比1.0"
+    }
+  ],
+  "aggressive": [
+    {
+      "symbol": "002415",
+      "name": "",
+      "close": "35.39",
+      "score": 69.99235349594649,
+      "momentum_score": 77.1,
+      "trend_score": 99.5,
+      "volume_score": 45.0,
+      "pct_chg_str": "+5.30%",
+      "reason": "动量+5.3%, 换手3.0%, 量比1.0"
+    },
+    {
+      "symbol": "600276",
+      "name": "",
+      "close": "55.61",
+      "score": 69.64094830999355,
+      "momentum_score": 76.2,
+      "trend_score": 100,
+      "volume_score": 45.0,
+      "pct_chg_str": "+3.96%",
+      "reason": "动量+4.0%, 换手3.0%, 量比1.0"
+    },
+    {
+      "symbol": "603259",
+      "name": "",
+      "close": "121.07",
+      "score": 68.66209303883558,
+      "momentum_score": 74.4,
+      "trend_score": 100,
+      "volume_score": 45.0,
+      "pct_chg_str": "-0.19%",
+      "reason": "动量-0.2%, 换手3.0%, 量比1.0"
+    }
+  ],
+  "market": {
+    "total": 46
+  },
+  "timestamp": "2026-07-09"
+}

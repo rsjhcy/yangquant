@@ -49,54 +49,45 @@ class CloseScreener:
 
     # ─── 股票池加载 ─────────────────────────────
     def load_universe(self) -> pd.DataFrame:
-        """获取主板股票实时行情 + 筛选范围
+        """获取主板股票数据
 
-        策略: 先用全市场接口 stock_zh_a_spot_em (一次请求)，
-        失败则尝试分别请求沪市/深市
+        稳定策略: watchlist + 日线历史API (走腾讯接口，稳定可靠)
+        增强策略: spot API 获取全市场实时数据 (速度快但不稳定)
         """
         import akshare as ak
 
-        logger.info("加载主板股票池...")
-        raw = None
+        logger.info("加载股票池...")
 
-        # 方案A: 全市场接口（一次请求，最不容易被限流）
-        self._is_fallback_mode = False
-        for attempt in range(3):
+        # ═══ 方案A (主力): watchlist + 日线API ═══
+        # 这个方案走腾讯数据源，不依赖东方财富，稳定性高
+        self._is_fallback_mode = True
+        raw = self._load_from_watchlist()
+
+        if raw is not None and not raw.empty:
+            logger.info(f"日线API加载成功: {len(raw)} 只")
+
+            # ═══ 方案B (锦上添花): 尝试spot API获取更全面数据 ═══
+            try:
+                spot = ak.stock_zh_a_spot_em()
+                if spot is not None and not spot.empty:
+                    self._is_fallback_mode = False
+                    logger.info(f"Spot API成功: {len(spot)} 只 → 切换为全市场模式")
+                    raw = spot
+            except Exception:
+                logger.debug("Spot API不可用，继续使用日线数据")
+        else:
+            # 日线API失败，尝试spot API
+            logger.warning("日线API失败，尝试Spot API...")
+            self._is_fallback_mode = False
             try:
                 raw = ak.stock_zh_a_spot_em()
-                if raw is not None and not raw.empty:
-                    break
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(2.0 ** (attempt + 1))
-                else:
-                    logger.warning(f"全市场接口失败: {e}")
-
-        # 方案B: 分别请求沪市+深市
-        if raw is None or (raw is not None and raw.empty):
-            logger.info("尝试分别获取沪市/深市...")
-            frames = []
-            for fetch_fn in [ak.stock_sh_a_spot_em, ak.stock_sz_a_spot_em]:
-                for attempt in range(2):
-                    try:
-                        r = fetch_fn()
-                        if r is not None and not r.empty:
-                            frames.append(r)
-                        break
-                    except Exception:
-                        time.sleep(2.0)
-            if frames:
-                raw = pd.concat(frames, ignore_index=True)
+            except Exception:
+                pass
 
         if raw is None or (raw is not None and raw.empty):
-            # 方案C: 用关注列表 + 日线历史数据兜底
-            logger.warning("Spot API不可用，尝试从关注列表加载...")
-            self._is_fallback_mode = True
-            raw = self._load_from_watchlist()
-            if raw is None or raw.empty:
-                raise RuntimeError(
-                    "无法获取股票列表 (akshare数据源暂时不可用，请稍后重试)"
-                )
+            raise RuntimeError(
+                "所有数据源均不可用，请稍后重试"
+            )
 
         df = raw.copy()
         logger.info(f"获取到 {len(df)} 只A股")

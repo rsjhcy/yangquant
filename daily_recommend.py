@@ -91,6 +91,7 @@ def run_close_phase(style: str, top_n: int):
     result = screener.run(style=style, top_n=top_n)
 
     # 打印结果
+    market = result.get("market", {})
     for st in (["balanced", "aggressive"] if style == "both" else [style]):
         picks = result.get(st, [])
         if not picks:
@@ -131,7 +132,6 @@ def run_close_phase(style: str, top_n: int):
             print(f"     💡 {sell_plan.get('note','')}")
             print()
 
-    market = result.get("market", {})
     print(f"  市场概况: {market.get('total','-')}只主板 | "
           f"{market.get('up_count','-')}↑/{market.get('down_count','-')}↓ | "
           f"平均涨跌: {market.get('avg_pct_chg','-')}")

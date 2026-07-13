@@ -45,6 +45,7 @@ class CloseScreener:
         self._spot_df: Optional[pd.DataFrame] = None
         self._daily_df: Optional[pd.DataFrame] = None
         self._results: Dict = {}
+        self._is_fallback_mode: bool = False
 
     # ─── 股票池加载 ─────────────────────────────
     def load_universe(self) -> pd.DataFrame:
@@ -59,6 +60,7 @@ class CloseScreener:
         raw = None
 
         # 方案A: 全市场接口（一次请求，最不容易被限流）
+        self._is_fallback_mode = False
         for attempt in range(3):
             try:
                 raw = ak.stock_zh_a_spot_em()
@@ -89,6 +91,7 @@ class CloseScreener:
         if raw is None or (raw is not None and raw.empty):
             # 方案C: 用关注列表 + 日线历史数据兜底
             logger.warning("Spot API不可用，尝试从关注列表加载...")
+            self._is_fallback_mode = True
             raw = self._load_from_watchlist()
             if raw is None or raw.empty:
                 raise RuntimeError(
@@ -628,8 +631,17 @@ class CloseScreener:
         # 1. 加载股票池
         df = self.load_universe()
 
-        # 2. 过滤
-        df = self.apply_filters(df)
+        # 2. 过滤（兜底模式下放宽条件）
+        before_filter = len(df)
+        if self._is_fallback_mode:
+            # 兜底模式：数据不全，只做基础过滤
+            if "pct_chg" in df.columns:
+                df = df[(df["pct_chg"] < 9.8) & (df["pct_chg"] > -9.8)]
+            if "name" in df.columns:
+                df = df[~df["name"].str.contains("ST|退", na=False)]
+            logger.info(f"兜底过滤: {before_filter} → {len(df)} 只")
+        else:
+            df = self.apply_filters(df)
 
         # 3. 打分
         scores = self.compute_scores(df, style)

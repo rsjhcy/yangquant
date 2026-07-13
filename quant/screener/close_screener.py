@@ -87,9 +87,13 @@ class CloseScreener:
                 raw = pd.concat(frames, ignore_index=True)
 
         if raw is None or (raw is not None and raw.empty):
-            raise RuntimeError(
-                "无法获取股票列表 (akshare数据源暂时不可用，请稍后重试)"
-            )
+            # 方案C: 用关注列表 + 日线历史数据兜底
+            logger.warning("Spot API不可用，尝试从关注列表加载...")
+            raw = self._load_from_watchlist()
+            if raw is None or raw.empty:
+                raise RuntimeError(
+                    "无法获取股票列表 (akshare数据源暂时不可用，请稍后重试)"
+                )
 
         df = raw.copy()
         logger.info(f"获取到 {len(df)} 只A股")
@@ -391,6 +395,44 @@ class CloseScreener:
         for style, picks in scores.items():
             result[style] = picks[:n]
         return result
+
+    def _load_from_watchlist(self) -> Optional[pd.DataFrame]:
+        """从关注列表加载股票，用日线API获取最新数据（Spot API不可用时的兜底方案）"""
+        from quant.data.sources import AkshareSource
+        from quant.data.updater import DataUpdater
+        from datetime import date as dt_date
+
+        updater = DataUpdater()
+        watchlist = updater.load_watchlist()
+
+        if not watchlist:
+            # 没有关注列表，使用默认大股票池
+            watchlist = [
+                "000001","000002","000333","000651","000725","000858","002142","002415",
+                "600000","600009","600016","600028","600030","600036","600048","600085",
+                "600104","600276","600309","600519","600585","600690","600809","600887",
+                "601012","601088","601166","601318","601398","603259",
+            ]
+            logger.info(f"使用默认股票池: {len(watchlist)} 只")
+
+        source = AkshareSource()
+        today = dt_date.today()
+        start = today - timedelta(days=5)  # last 5 trading days
+
+        try:
+            df = source.get_daily(watchlist, start, today)
+            if df is not None and not df.empty:
+                # Get only the latest trading day
+                latest = df["date"].max()
+                df = df[df["date"] == latest].copy()
+                # Rename columns to match spot format
+                df["pct_chg"] = df.groupby("symbol")["close"].pct_change().fillna(0).values
+                logger.info(f"日线兜底: {len(df)} 只股票 ({latest})")
+                return df
+        except Exception as e:
+            logger.warning(f"日线兜底也失败: {e}")
+
+        return None
 
     # ─── 股票名称查找 ─────────────────────────
     @staticmethod

@@ -406,7 +406,6 @@ class CloseScreener:
         watchlist = updater.load_watchlist()
 
         if not watchlist:
-            # 没有关注列表，使用默认大股票池
             watchlist = [
                 "000001","000002","000333","000651","000725","000858","002142","002415",
                 "600000","600009","600016","600028","600030","600036","600048","600085",
@@ -417,20 +416,56 @@ class CloseScreener:
 
         source = AkshareSource()
         today = dt_date.today()
-        start = today - timedelta(days=5)  # last 5 trading days
+        start = today - timedelta(days=60)  # need enough history for indicators
 
         try:
             df = source.get_daily(watchlist, start, today)
             if df is not None and not df.empty:
-                # Get only the latest trading day
+                df = df.sort_values(["symbol", "date"])
                 latest = df["date"].max()
-                df = df[df["date"] == latest].copy()
-                # Rename columns to match spot format
-                df["pct_chg"] = df.groupby("symbol")["close"].pct_change().fillna(0).values
-                logger.info(f"日线兜底: {len(df)} 只股票 ({latest})")
-                return df
+
+                # Compute pct_chg from per-symbol changes
+                pct_changes = []
+                for sym in watchlist:
+                    sdf = df[df["symbol"] == sym].sort_values("date")
+                    if len(sdf) >= 2:
+                        chg = (float(sdf["close"].iloc[-1]) / float(sdf["close"].iloc[-2]) - 1) * 100
+                    else:
+                        chg = 0.0
+                    pct_changes.append({"symbol": sym, "pct_chg": chg})
+
+                pct_df = pd.DataFrame(pct_changes)
+
+                # Get only latest day + merge pct_chg
+                latest_day = df[df["date"] == latest].copy()
+                latest_day = latest_day.merge(pct_df, on="symbol", how="left")
+                latest_day["pct_chg"] = latest_day["pct_chg"].fillna(0)
+
+                # Add name
+                latest_day["name"] = latest_day["symbol"].apply(self._lookup_name)
+
+                # Ensure required columns exist with defaults
+                for col, default in [("turnover", 3.0), ("volume_ratio", 1.0), ("pe", 30.0), ("amount", 1e8)]:
+                    if col not in latest_day.columns:
+                        latest_day[col] = default
+
+                # Compute volume_ratio from history if possible
+                # (simplified: use the last 5 days average)
+                for sym in watchlist:
+                    sdf = df[df["symbol"] == sym].sort_values("date")
+                    if len(sdf) >= 6 and "volume" in sdf.columns:
+                        avg_vol = sdf["volume"].iloc[-6:-1].mean()
+                        cur_vol = sdf["volume"].iloc[-1]
+                        mask = latest_day["symbol"] == sym
+                        if avg_vol > 0:
+                            latest_day.loc[mask, "volume_ratio"] = cur_vol / avg_vol
+
+                logger.info(f"日线兜底: {len(latest_day)} 只股票 ({latest})")
+                return latest_day
         except Exception as e:
             logger.warning(f"日线兜底也失败: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
 
         return None
 

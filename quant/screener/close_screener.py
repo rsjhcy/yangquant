@@ -410,7 +410,7 @@ class CloseScreener:
 
         source = AkshareSource()
         today = dt_date.today()
-        start = today - timedelta(days=60)  # need enough history for indicators
+        start = today - timedelta(days=10)  # 10 days enough for latest day + pct_chg
 
         try:
             df = source.get_daily(watchlist, start, today)

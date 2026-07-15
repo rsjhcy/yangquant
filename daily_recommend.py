@@ -119,8 +119,9 @@ def run_close_phase(style: str, top_n: int):
             pick['sell_plan'] = sell_plan
             pick['sell_plan_str'] = (
                 f"止损: {sell_plan['stop_loss']}({sell_plan['stop_loss_pct']}) | "
-                f"止盈1: {sell_plan['take_profit_1']}({sell_plan['take_profit_1_pct']}) | "
-                f"止盈2: {sell_plan['take_profit_2']}({sell_plan['take_profit_2_pct']}) | "
+                f"止盈: {sell_plan['take_profit_1']}({sell_plan['take_profit_1_pct']}) | "
+                f"移动止损: {sell_plan['trailing_start']} | "
+                f"水下{sell_plan['time_stop_days']}天平仓 | "
                 f"持有≤{sell_plan['max_hold_days']}天"
             )
 

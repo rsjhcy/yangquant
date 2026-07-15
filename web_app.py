@@ -205,7 +205,13 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
 
     log(job_id, f"📊 数据就绪: {len(df)}行, {df['symbol'].nunique()}只有效")
 
-    # 按股票分组打分（groupby O(n)）
+    # ═══════════════════════════════════════════════════════
+    # 完整10因子体系 + 市场状态识别 + 共振加分
+    # ═══════════════════════════════════════════════════════
+
+    # 市场状态统计（边打分边收集）
+    market_stats = {"above_ma20": 0, "count": 0, "total_r20": 0.0}
+
     results = []
     pool_set = set(stock_pool)
     grouped = df.groupby("symbol")
@@ -217,49 +223,198 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
         processed += 1
 
         sym_data = sym_data.sort_values("date")
-        if len(sym_data) < 3:
+        n_days = len(sym_data)
+        if n_days < 10:
             continue
 
+        # ── 提取OHLCV数组 ──
         close_v = sym_data["close"].values.astype(float)
+        high_v = sym_data["high"].values.astype(float)
+        low_v = sym_data["low"].values.astype(float)
+        vol_v = sym_data["volume"].values.astype(float)
+
         close = close_v[-1]
-        prev = close_v[-2] if len(close_v) >= 2 else close
-        daily_pct = (close / prev - 1) * 100
-
-        r5 = close / close_v[max(0, len(close_v)-6)] - 1
-        r20 = close / close_v[max(0, len(close_v)-21)] - 1
-
+        prev_close = close_v[-2] if n_days >= 2 else close
         turnover = float(sym_data.iloc[-1].get("turnover", 3) or 3)
 
-        if len(close_v) >= 20:
-            ma20 = pd.Series(close_v).rolling(20, min_periods=10).mean().values
+        # ── 基础指标计算 ──
+        ma5 = pd.Series(close_v).rolling(5, min_periods=3).mean().values
+        ma20 = pd.Series(close_v).rolling(20, min_periods=10).mean().values
+        ma20_std = pd.Series(close_v).rolling(20, min_periods=10).std().values
+
+        # ATR(14)
+        tr = np.zeros(n_days)
+        for i in range(1, n_days):
+            tr[i] = max(high_v[i] - low_v[i],
+                        abs(high_v[i] - close_v[i-1]),
+                        abs(low_v[i] - close_v[i-1]))
+        tr[0] = high_v[0] - low_v[0]
+        atr = pd.Series(tr).rolling(14, min_periods=7).mean().values
+        atr_val = atr[-1] if atr[-1] > 0 else close * 0.02
+        atr_pct = atr_val / close if close > 0 else 0.02
+
+        # RSI(14)
+        delta = np.diff(close_v)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(14, min_periods=7).mean().values
+        avg_loss = pd.Series(loss).rolling(14, min_periods=7).mean().values
+        rs = avg_gain[-1] / max(avg_loss[-1], 1e-9)
+        rsi = 100 - (100 / (1 + rs))
+
+        # 布林带
+        bb_mid = ma20[-1] if ma20[-1] > 0 else close
+        bb_std = ma20_std[-1] if ma20_std[-1] > 0 else close * 0.02
+        bb_upper = bb_mid + 2 * bb_std
+        bb_lower = bb_mid - 2 * bb_std
+        bb_position = (close - bb_lower) / max(bb_upper - bb_lower, 0.001)
+
+        # 成交量突破
+        avg_vol_20 = np.mean(vol_v[-21:-1]) if n_days >= 21 else np.mean(vol_v[:-1])
+        vol_ratio = vol_v[-1] / avg_vol_20 if avg_vol_20 > 0 else 1.0
+        # 价涨量增才有效
+        vol_breakout = vol_ratio if close > prev_close else vol_ratio * 0.5
+
+        # 连续放量天数
+        consecutive_vol = 0
+        for i in range(n_days - 1, max(0, n_days - 21), -1):
+            lookback = vol_v[max(0, i-20):i]
+            avg_vi = np.mean(lookback) if len(lookback) > 0 else vol_v[i]
+            if avg_vi > 0 and vol_v[i] > avg_vi * 1.2:
+                consecutive_vol += 1
+            else:
+                break
+
+        # 收益率
+        r5 = close / close_v[max(0, n_days-6)] - 1
+        r20 = close / close_v[max(0, n_days-21)] - 1
+
+        # MA5加速度
+        if n_days >= 8 and ma5[-4] > 0:
+            ma5_slope_now = (ma5[-1] - ma5[-4]) / ma5[-4]
+            ma5_slope_prev = (ma5[-4] - ma5[-7]) / ma5[-7] if n_days >= 10 and ma5[-7] > 0 else 0
+            ma5_accel = ma5_slope_now - ma5_slope_prev
+        else:
+            ma5_accel = 0
+
+        # MA20偏离
+        ma20_dev = (close - ma20[-1]) / ma20[-1] if ma20[-1] > 0 else 0
+
+        # ── 市场状态统计 ──
+        if n_days >= 20 and ma20[-1] > 0:
+            market_stats["above_ma20"] += 1 if close > ma20[-1] else 0
+            market_stats["count"] += 1
+            market_stats["total_r20"] += r20
+
+        # ═══════════════════════════════
+        # 10因子独立打分 (每项0-100)
+        # ═══════════════════════════════
+
+        # 【动量类】
+        # F1: 短期动量 = 5日风险调整收益 (收益÷ATR)
+        if atr_pct > 0.001:
+            risk_adj_mom = r5 / atr_pct
+            f1 = min(100, max(5, 50 + risk_adj_mom * 15))
+        else:
+            f1 = min(100, max(5, 50 + r5 * 500))
+
+        # F2: 中期动量 = 20日收益率 (温和上涨0~30%最佳)
+        f2 = min(100, max(5, 50 + r20 * 250))
+        if r20 > 0.30:
+            f2 = max(30, f2 - (r20 - 0.30) * 150)
+
+        # 【趋势类】
+        # F3: 均线偏离 (略高于MA20 +1%~+5%最佳)
+        f3 = min(100, max(5, 80 - abs(ma20_dev - 0.03) * 400))
+
+        # F4: MA5加速度 (加速上翘高分)
+        f4 = min(100, max(5, 50 + ma5_accel * 300))
+
+        # 【量价类】
+        # F5: 成交量突破 (量>1.3倍且价涨)
+        f5 = min(100, max(5, 50 + (vol_breakout - 1.0) * 40))
+
+        # F6: 连续放量天数
+        f6 = min(100, max(5, consecutive_vol * 20 + 20))
+
+        # F7: 换手率质量 (2%-10%最健康)
+        if 2 <= turnover <= 10:
+            f7 = 85 - abs(turnover - 5) * 8
+        elif 0.5 <= turnover < 2:
+            f7 = 40 + (turnover - 0.5) * 30
+        elif 10 < turnover <= 25:
+            f7 = max(10, 85 - (turnover - 10) * 5)
+        else:
+            f7 = 10
+        f7 = min(100, max(5, f7))
+
+        # 【风控类】
+        # F8: RSI动能 (45-70最佳，上升不失速)
+        if 45 <= rsi <= 70:
+            f8 = 90 - abs(rsi - 57) * 2
+        elif 30 <= rsi < 45:
+            f8 = 40 + (rsi - 30) * 2
+        elif 70 < rsi <= 85:
+            f8 = max(10, 90 - (rsi - 70) * 4)
+        else:
+            f8 = 10
+        f8 = min(100, max(5, f8))
+
+        # F9: 布林带位置 (偏下轨0.1-0.4有反弹空间)
+        f9 = min(100, max(5, 85 - abs(bb_position - 0.25) * 120))
+
+        # F10: 低波动溢价 (ATR%小=走势稳)
+        f10 = min(100, max(5, 90 - atr_pct * 200))
+
+        # ── 因子归类汇总 ──
+        momentum_raw = f1 * 0.5 + f2 * 0.5
+        trend_raw = f3 * 0.5 + f4 * 0.5
+        volume_raw = f5 * 0.35 + f6 * 0.35 + f7 * 0.30
+        risk_raw = f8 * 0.35 + f9 * 0.35 + f10 * 0.30
+
+        # ── 共振加分 ──
+        factor_vals = [f1, f2, f3, f4, f5, f6, f7, f8, f9, f10]
+        high_count = sum(1 for v in factor_vals if v > 60)
+        if high_count >= 7:
+            resonance = 1.15
+        elif high_count >= 5:
+            resonance = 1.08
+        elif high_count >= 3:
+            resonance = 1.03
+        else:
+            resonance = 1.0
+
+        # 趋势强度 (价格在MA20上方天数占比)
+        if n_days >= 20 and ma20[-1] > 0:
             trend_strength = np.sum(close_v[-20:] > ma20[-20:]) / 20
         else:
             trend_strength = 0.5
-
-        mom = min(100, max(0, 50 + r5 * 400)) * 0.5 + min(100, max(0, 50 + r20 * 200)) * 0.5
-        trend = min(100, max(0, 50 + r20 * 300))
-        to_s = min(100, max(5, 40 if 2 < turnover < 15 else 15))
-        vol_q = to_s * 0.6 + 40
-        risk = min(100, max(0, 70 - abs(daily_pct) * 10))
-        score = mom * 0.30 + trend * 0.25 + vol_q * 0.25 + risk * 0.20
-
         is_trending = bool(trend_strength > 0.7 and r20 > 0.05)
+
+        # 最终基础分 (等权 + 共振 + 趋势加成)
+        base_score = (momentum_raw + trend_raw + volume_raw + risk_raw) / 4
+        score = base_score * resonance
         if is_trending:
-            score *= 1.15
+            score *= 1.05
 
         name = name_map.get(sym, sym)
         results.append({
             "symbol": sym, "name": name,
             "close": f"{close:.2f}", "close_val": float(close),
             "score": round(float(score), 1),
-            "momentum_score": round(float(mom), 1), "trend_score": round(float(trend), 1),
-            "volume_score": round(float(vol_q), 1),
-            "pct_chg": f"{daily_pct:+.2f}%",
+            "momentum_score": round(float(momentum_raw), 1),
+            "trend_score": round(float(trend_raw), 1),
+            "volume_score": round(float(volume_raw), 1),
+            "risk_score": round(float(risk_raw), 1),
+            "pct_chg": f"{(close/prev_close-1)*100:+.2f}%",
             "r5": f"{float(r5):+.1%}", "r20": f"{float(r20):+.1%}",
             "turnover": round(float(turnover), 1),
+            "atr_pct": f"{float(atr_pct):.1%}",
+            "rsi": round(float(rsi), 1),
             "is_trending": is_trending,
             "trend_strength": round(float(trend_strength) * 100),
-            "reason": _reason(r5, r20, turnover, is_trending),
+            "resonance": high_count,
+            "reason": _reason_v2(factor_vals, r5, r20, turnover, is_trending, high_count),
         })
 
         if processed % 100 == 0:
@@ -267,31 +422,54 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
 
     log(job_id, f"  📊 打分完成: {len(results)}只有效")
 
-    # ── 平衡型：重风险+趋势，轻动量 ──
+    # ── 市场状态识别 ──
+    regime = "ranging"
+    if market_stats["count"] > 100:
+        pct_above = market_stats["above_ma20"] / market_stats["count"]
+        avg_r20 = market_stats["total_r20"] / market_stats["count"]
+        if pct_above > 0.60 and avg_r20 > 0.05:
+            regime = "trending_up"
+        elif pct_above < 0.30 and avg_r20 < -0.05:
+            regime = "trending_down"
+        else:
+            regime = "ranging"
+    else:
+        pct_above = 0.5
+
+    # ── 动态权重（市场状态调整）──
+    if regime == "trending_up":
+        w_mom, w_trend, w_vol, w_risk = 0.30, 0.25, 0.25, 0.20
+        regime_note = f"📈 上涨市({pct_above:.0%}站上MA20): 动量+趋势55%"
+    elif regime == "trending_down":
+        w_mom, w_trend, w_vol, w_risk = 0.15, 0.15, 0.25, 0.45
+        regime_note = f"📉 下跌市({pct_above:.0%}站上MA20): 反转+低波动55%"
+    else:
+        w_mom, w_trend, w_vol, w_risk = 0.25, 0.25, 0.25, 0.25
+        regime_note = f"📊 震荡市({pct_above:.0%}站上MA20): 均衡配置"
+    log(job_id, f"  🌐 市场状态: {regime_note}")
+
+    # ── 平衡型: 重风险+趋势，轻动量 ──
     for r in results:
         r["bal_score"] = round(
-            r["volume_score"] * 0.15 +     # 动量(低)
-            r["trend_score"] * 0.30 +      # 趋势(高)
-            r["volume_score"] * 0.20 +     # 量价(中)
-            # 风险分重算：波动小+距高点近=高分
-            max(0, 70 - abs(float(r["r20"].rstrip("%")))*1.5) * 0.35
+            r["momentum_score"] * w_mom * 0.7 +
+            r["trend_score"] * w_trend * 1.2 +
+            r["volume_score"] * w_vol * 0.8 +
+            r["risk_score"] * w_risk * 1.3
         , 1)
     results.sort(key=lambda x: x["bal_score"], reverse=True)
     balanced = _copy_top(results, 3, score_key="bal_score")
 
-    # ── 激进型：重动量+量价，轻风险，排除平衡型已选 ──
+    # ── 激进型: 重动量+量价，轻风险，排除平衡型已选 ──
     balanced_syms = {p["symbol"] for p in balanced}
     for r in results:
         if r["symbol"] in balanced_syms:
             continue
-        # 动量和涨跌幅是核心
-        pct = float(r["pct_chg"].rstrip("%"))
         r["agg_score"] = round(
-            r["momentum_score"] * 0.45 +    # 动量(极高)
-            r["volume_score"] * 0.30 +      # 量价(高)
-            r["trend_score"] * 0.15 +       # 趋势(低)
-            max(0, 60 - abs(pct)*5) * 0.10  # 接受更高波动
-            + (10 if r["is_trending"] else 0)  # 趋势加成
+            r["momentum_score"] * w_mom * 1.5 +
+            r["volume_score"] * w_vol * 1.2 +
+            r["trend_score"] * w_trend * 0.6 +
+            r["risk_score"] * w_risk * 0.4 +
+            (8 if r["is_trending"] else 0)
         , 1)
     results.sort(key=lambda x: x.get("agg_score", 0), reverse=True)
     aggressive = _copy_top(results, 3, score_key="agg_score")
@@ -305,7 +483,9 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
             p["sell_plan"] = plan
             p["sell_plan_str"] = (
                 f"止损:{plan['stop_loss']}({plan['stop_loss_pct']}) | "
-                f"止盈1:{plan['take_profit_1']}({plan['take_profit_1_pct']}) | "
+                f"止盈:{plan['take_profit_1']}({plan['take_profit_1_pct']}) | "
+                f"移动止损:{plan['trailing_start']} | "
+                f"水下{plan['time_stop_days']}天平仓 | "
                 f"持有≤{plan['max_hold_days']}天"
             )
 
@@ -314,7 +494,12 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
         "balanced": balanced, "aggressive": aggressive,
         "date": str(today),
         "saved_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M"),
-        "market_summary": {"total_screened": len(results), "latest_data_date": str(latest_date)},
+        "market_summary": {
+            "total_screened": len(results),
+            "latest_data_date": str(latest_date),
+            "regime": regime,
+            "regime_note": regime_note,
+        },
     }
     Path("data").mkdir(exist_ok=True)
     with open("data/stable_result.json", "w", encoding="utf-8") as f:
@@ -461,14 +646,27 @@ def do_auction_analysis(job_id):
 
 # ─── 工具函数 ────────────────────────────────────
 
-def _reason(r5, r20, turnover, is_trending):
+def _reason_v2(factors, r5, r20, turnover, is_trending, resonance):
+    """根据10因子生成推荐理由"""
     parts = []
-    if is_trending: parts.append("🔥强趋势")
-    if r5 > 0.03: parts.append("短期动量强")
-    elif r5 < -0.02: parts.append("短期回调")
-    if r20 > 0.05: parts.append("中期上行")
-    if 2 < turnover < 15: parts.append("换手活跃")
-    return " | ".join(parts) if parts else "综合评分领先"
+    # 因子名称
+    names = ["短动量", "中动量", "均线偏离", "MA5加速", "量突破",
+             "连放量", "换手率", "RSI动能", "布林带", "低波动"]
+    # 高分因子
+    stars = [names[i] for i, v in enumerate(factors) if v > 70]
+    if len(stars) >= 5:
+        parts.append(f"多因子共振({len(stars)}项)")
+    elif stars:
+        parts.append("+".join(stars[:3]))
+
+    if is_trending: parts.insert(0, "🔥强趋势")
+    if r5 > 0.03: parts.append("短期强势")
+    elif r5 < -0.02: parts.append("短线回调低吸")
+    if r20 > 0.05: parts.append("中期多头")
+    if 2 < turnover < 10: parts.append("换手健康")
+    elif turnover >= 10: parts.append("交投活跃")
+
+    return " | ".join(parts) if parts else "综合因子优秀"
 
 def _copy_top(results, n, score_key=None):
     picks = []

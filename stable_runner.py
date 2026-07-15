@@ -199,7 +199,9 @@ def run_close_phase():
             p["sell_plan"] = plan
             p["sell_plan_str"] = (
                 f"止损:{plan['stop_loss']}({plan['stop_loss_pct']}) | "
-                f"止盈1:{plan['take_profit_1']}({plan['take_profit_1_pct']}) | "
+                f"止盈:{plan['take_profit_1']}({plan['take_profit_1_pct']}) | "
+                f"移动止损:{plan['trailing_start']} | "
+                f"水下{plan['time_stop_days']}天平仓 | "
                 f"持有≤{plan['max_hold_days']}天"
             )
 

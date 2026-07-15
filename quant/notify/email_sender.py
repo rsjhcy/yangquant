@@ -117,8 +117,9 @@ class EmailSender:
                     <span style="font-size:12px; color:#e67e22;">📉 <b>卖出计划</b></span>
                     <span style="font-size:12px; color:#888; margin-left:8px;">
                         止损: <b style="color:#e74c3c;">{plan.get('stop_loss','-')}</b>
-                        &nbsp;|&nbsp; 止盈1: <b style="color:#27ae60;">{plan.get('take_profit_1','-')}</b>
-                        &nbsp;|&nbsp; 止盈2: <b style="color:#27ae60;">{plan.get('take_profit_2','-')}</b>
+                        &nbsp;|&nbsp; 止盈: <b style="color:#27ae60;">{plan.get('take_profit_1','-')}</b>
+                        &nbsp;|&nbsp; 移动止损: <b>{plan.get('trailing_start','-')}</b>
+                        &nbsp;|&nbsp; 水下<b>{plan.get('time_stop_days','-')}</b>天平仓
                         &nbsp;|&nbsp; 最长持有: <b>{plan.get('max_hold_days','-')}天</b>
                     </span>
                     <br><span style="font-size:11px; color:#999;">{plan.get('note','')}</span>

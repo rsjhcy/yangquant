@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: yangquant
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python web_app.py
+    envVars:
+      - key: PORT
+        value: 10000
+    plan: free

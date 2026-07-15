@@ -4,8 +4,15 @@ data/financials/
 data/index/
 data/*.parquet
 data/backtest_cache.parquet
+data/stable_result.json
+data/stock_pool_cache.json
 logs/
 __pycache__/
 *.pyc
 .env
 config.yaml
+ngrok.exe
+*.bat
+*.ps1
+start_server.bat
+/tmp/

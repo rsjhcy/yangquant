@@ -163,7 +163,7 @@ class EmailSender:
                         </tr>
                         <tr>
                             <td style="padding:2px 8px;" colspan="2">昨收: <b>{pick.get('close', '-')}</b></td>
-                            <td style="padding:2px 8px;" colspan="2">涨幅: <b style="color:{'#e74c3c' if pick.get('pct_chg',0) > 0 else '#27ae60'};">{pick.get('pct_chg_str','-')}</b></td>
+                            <td style="padding:2px 8px;" colspan="2">涨幅: <b style="color:{'#e74c3c' if str(pick.get('pct_chg','0')).startswith('+') else '#27ae60' if str(pick.get('pct_chg','0')).startswith('-') else '#555'};">{pick.get('pct_chg','-')}</b></td>
                         </tr>
                         {f'<tr><td style="padding:2px 8px; color:#888;" colspan="4">📌 {reason}</td></tr>' if reason else ''}
                         {f'<tr><td style="padding:2px 8px; color:#e67e22;" colspan="4">⚠ {notes}</td></tr>' if notes else ''}

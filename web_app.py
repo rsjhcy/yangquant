@@ -59,9 +59,12 @@ def load_stock_pool(sample_size=300):
     valid = info[mask].copy()
     valid = valid.sort_values("code")
 
-    # 系统采样（均匀覆盖所有板块）
-    step = max(1, len(valid) // sample_size)
-    sampled = valid.iloc[::step].head(sample_size)
+    # 系统采样（均匀覆盖所有板块），sample_size=0 取全量
+    if sample_size > 0:
+        step = max(1, len(valid) // sample_size)
+        sampled = valid.iloc[::step].head(sample_size)
+    else:
+        sampled = valid  # 全A股
 
     pool = sampled["code"].tolist()
     name_map = dict(zip(sampled["code"], sampled["name"]))
@@ -264,15 +267,34 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
 
     log(job_id, f"  📊 打分完成: {len(results)}只有效")
 
-    # 排名
-    results.sort(key=lambda x: x["score"], reverse=True)
-    balanced = _copy_top(results, 3)
-
+    # ── 平衡型：重风险+趋势，轻动量 ──
     for r in results:
-        r["agg"] = r["score"] * 1.10 if r["is_trending"] else \
-            r["momentum_score"] * 0.45 + r["trend_score"] * 0.15 + r["volume_score"] * 0.30 + r["score"] * 0.10
-    results.sort(key=lambda x: x.get("agg", 0), reverse=True)
-    aggressive = _copy_top(results, 3)
+        r["bal_score"] = round(
+            r["volume_score"] * 0.15 +     # 动量(低)
+            r["trend_score"] * 0.30 +      # 趋势(高)
+            r["volume_score"] * 0.20 +     # 量价(中)
+            # 风险分重算：波动小+距高点近=高分
+            max(0, 70 - abs(float(r["r20"].rstrip("%")))*1.5) * 0.35
+        , 1)
+    results.sort(key=lambda x: x["bal_score"], reverse=True)
+    balanced = _copy_top(results, 3, score_key="bal_score")
+
+    # ── 激进型：重动量+量价，轻风险，排除平衡型已选 ──
+    balanced_syms = {p["symbol"] for p in balanced}
+    for r in results:
+        if r["symbol"] in balanced_syms:
+            continue
+        # 动量和涨跌幅是核心
+        pct = float(r["pct_chg"].rstrip("%"))
+        r["agg_score"] = round(
+            r["momentum_score"] * 0.45 +    # 动量(极高)
+            r["volume_score"] * 0.30 +      # 量价(高)
+            r["trend_score"] * 0.15 +       # 趋势(低)
+            max(0, 60 - abs(pct)*5) * 0.10  # 接受更高波动
+            + (10 if r["is_trending"] else 0)  # 趋势加成
+        , 1)
+    results.sort(key=lambda x: x.get("agg_score", 0), reverse=True)
+    aggressive = _copy_top(results, 3, score_key="agg_score")
 
     # 卖出计划
     from quant.screener.sell_advisor import SellAdvisor
@@ -448,8 +470,14 @@ def _reason(r5, r20, turnover, is_trending):
     if 2 < turnover < 15: parts.append("换手活跃")
     return " | ".join(parts) if parts else "综合评分领先"
 
-def _copy_top(results, n):
-    return [{k: v for k, v in r.items() if k not in ("agg", "close_val")} for r in results[:n]]
+def _copy_top(results, n, score_key=None):
+    picks = []
+    for r in results[:n]:
+        p = {k: v for k, v in r.items() if k not in ("agg_score","bal_score","agg","close_val")}
+        if score_key and score_key in r:
+            p["score"] = r[score_key]  # 覆盖为对应策略的分数
+        picks.append(p)
+    return picks
 
 def _merge_auction(picks, lookup):
     for p in picks:
@@ -594,10 +622,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 <div class="options" style="max-width:700px;margin:0 auto 12px;padding:0 16px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:13px;color:#666">
   <label>📦 股票数量:
     <select id="sampleSize" style="padding:4px 8px;border-radius:6px;border:1px solid #ddd">
-      <option value="200">200只 (~5秒)</option>
-      <option value="500" selected>500只 (~12秒)</option>
-      <option value="800">800只 (~20秒)</option>
-      <option value="1200">1200只 (~30秒)</option>
+      <option value="200">200只 (~10秒)</option>
+      <option value="500" selected>500只 (~20秒)</option>
+      <option value="1200">1200只 (~50秒)</option>
+      <option value="0">🔥 全A股 (~3000只, ~2分钟)</option>
     </select>
   </label>
   <label>📧 <input type="checkbox" id="sendEmail"> 收盘后同时推送到邮箱</label>
@@ -635,11 +663,12 @@ async function runClose() {
   document.getElementById('results').innerHTML='';
   showLogs('⏳ 并行下载中...请耐心等待');
   const sendEmail=document.getElementById('sendEmail').checked;
-  const sampleSize=document.getElementById('sampleSize').value;
 
-  // 30秒超时（共享Session直连, 1200只~30秒）
+  // 动态超时：全A股3分钟，其他1分钟
+  const sampleSize=document.getElementById('sampleSize').value;
+  const timeout=sampleSize==0?180000:60000;
   const ctrl=new AbortController();
-  const timer=setTimeout(()=>ctrl.abort(),30000);
+  const timer=setTimeout(()=>ctrl.abort(),timeout);
 
   try {
     const resp=await fetch('/api/close',{
@@ -656,7 +685,7 @@ async function runClose() {
     if(data.result&&data.result.email_sent)showLogs(data.logs+'\\n✅ 邮件已发送到两个邮箱');
   }catch(e){
     clearTimeout(timer);
-    if(e.name==='AbortError')showLogs('⏰ 请求超时 (30秒)。请减少股票数量或检查网络。');
+    if(e.name==='AbortError')showLogs('⏰ 请求超时。请减少股票数量或检查网络。');
     else showLogs('❌ 错误: '+e.message);
   }
   btn.disabled=false;

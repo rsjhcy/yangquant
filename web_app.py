@@ -242,13 +242,17 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
         ma20 = pd.Series(close_v).rolling(20, min_periods=10).mean().values
         ma20_std = pd.Series(close_v).rolling(20, min_periods=10).std().values
 
-        # ATR(14)
+        # ATR(14) — 向量化计算，无Python循环
         tr = np.zeros(n_days)
-        for i in range(1, n_days):
-            tr[i] = max(high_v[i] - low_v[i],
-                        abs(high_v[i] - close_v[i-1]),
-                        abs(low_v[i] - close_v[i-1]))
         tr[0] = high_v[0] - low_v[0]
+        if n_days >= 2:
+            tr[1:] = np.maximum(
+                high_v[1:] - low_v[1:],
+                np.maximum(
+                    np.abs(high_v[1:] - close_v[:-1]),
+                    np.abs(low_v[1:] - close_v[:-1])
+                )
+            )
         atr = pd.Series(tr).rolling(14, min_periods=7).mean().values
         atr_val = atr[-1] if atr[-1] > 0 else close * 0.02
         atr_pct = atr_val / close if close > 0 else 0.02
@@ -275,15 +279,18 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
         # 价涨量增才有效
         vol_breakout = vol_ratio if close > prev_close else vol_ratio * 0.5
 
-        # 连续放量天数
-        consecutive_vol = 0
-        for i in range(n_days - 1, max(0, n_days - 21), -1):
-            lookback = vol_v[max(0, i-20):i]
-            avg_vi = np.mean(lookback) if len(lookback) > 0 else vol_v[i]
-            if avg_vi > 0 and vol_v[i] > avg_vi * 1.2:
-                consecutive_vol += 1
-            else:
-                break
+        # 连续放量天数 — 向量化：预计算20日均量，批量比较
+        vol_ma20 = pd.Series(vol_v).rolling(20, min_periods=5).mean().values
+        vol_surge = vol_v > vol_ma20 * 1.2  # 每日是否放量
+        # 从昨天往前数，连续True的天数
+        check_end = n_days - 2  # 不包含今天（今天MA20含自己）
+        check_start = max(0, n_days - 22)
+        recent = vol_surge[check_start:check_end+1][::-1]  # 倒序
+        if len(recent) > 0 and recent[0]:
+            first_false = np.argmin(recent)  # argmin on bool = first False
+            consecutive_vol = first_false if not recent[first_false] else len(recent)
+        else:
+            consecutive_vol = 0
 
         # 收益率
         r5 = close / close_v[max(0, n_days-6)] - 1
@@ -528,7 +535,14 @@ def do_close_screening(job_id, send_email=False, sample_size=500):
 
 
 def do_auction_analysis(job_id):
-    """竞价分析 + 发邮件"""
+    """竞价分析 + 发邮件
+
+    数据源优先级:
+    1. stock_zh_a_hist_pre_min_em (分钟级竞价数据，仅在9:15-9:25可用)
+    2. stock_zh_a_spot_em (实时行情，全天可用，竞价时段反映拍卖价)
+    """
+    from datetime import datetime as dt
+
     log(job_id, "📈 开始竞价分析...")
 
     path = Path("data/stable_result.json")
@@ -554,75 +568,154 @@ def do_auction_analysis(job_id):
     log(job_id, f"🔍 获取 {len(unique)} 只竞价数据...")
 
     import akshare as ak
+    now = dt.now()
+    in_auction_window = (now.hour == 9 and now.minute >= 15) or (now.hour == 9 and now.minute <= 25)
+    if in_auction_window:
+        log(job_id, "⏰ 当前在竞价时段 (9:15-9:25)，优先使用分钟级数据")
+    else:
+        log(job_id, "⏰ 非竞价时段，使用实时行情数据")
+
+    # ── 先批量获取实时行情（spot API 可靠，作为兜底）──
+    spot_lookup = {}
+    try:
+        spot_df = ak.stock_zh_a_spot_em()
+        if spot_df is not None and not spot_df.empty:
+            for _, row in spot_df.iterrows():
+                code = str(row.get("代码", ""))
+                spot_lookup[code] = {
+                    "price": float(row.get("最新价", 0)),
+                    "pct": float(row.get("涨跌幅", 0)),
+                    "volume": float(row.get("成交量", 0)),
+                    "amount": float(row.get("成交额", 0)),
+                    "high": float(row.get("最高", 0)),
+                    "low": float(row.get("最低", 0)),
+                    "open": float(row.get("今开", 0)),
+                }
+        log(job_id, f"  ✅ 实时行情获取成功: {len(spot_lookup)} 只")
+    except Exception as e:
+        log(job_id, f"  ⚠ 实时行情获取失败: {e}")
+
     auction_data = []
     for p in unique:
         sym = p["symbol"]
-        try:
-            auc = ak.stock_zh_a_hist_pre_min_em(sym, "09:15:00", "09:25:00")
-            if auc is not None and not auc.empty:
-                prices = auc["收盘"].values.astype(float) if "收盘" in auc.columns else None
-                volumes = auc["成交量"].values.astype(float) if "成交量" in auc.columns else None
+        prev_close = float(p.get("close_val", p.get("close", 0)))
+        name = p.get("name", sym)
 
-                if prices is not None and len(prices) >= 2:
-                    prev_close = float(p.get("close_val", p.get("close", 0)))
+        # ── 方案A: 尝试分钟级竞价数据 ──
+        minute_data = None
+        if in_auction_window:
+            for attempt in range(3):
+                try:
+                    minute_data = ak.stock_zh_a_hist_pre_min_em(sym, "09:15:00", "09:25:00")
+                    if minute_data is not None and not minute_data.empty:
+                        break
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(0.5 * (attempt + 1))
+                    continue
+
+        if minute_data is not None and not minute_data.empty:
+            # ── 分钟数据分析 ──
+            try:
+                prices = minute_data["收盘"].values.astype(float)
+                volumes = minute_data["成交量"].values.astype(float) if "成交量" in minute_data.columns else None
+
+                if len(prices) >= 2:
                     late_prices = prices[-5:] if len(prices) >= 5 else prices
-
                     # 价格趋势分
-                    if len(late_prices) >= 2:
-                        slope = (late_prices[-1] - late_prices[0]) / late_prices[0] * 100
-                        price_score = min(100, max(0, 50 + slope * 30))
-                    else:
-                        price_score = 50
+                    slope = (late_prices[-1] - late_prices[0]) / late_prices[0] * 100
+                    price_score = min(100, max(0, 50 + slope * 30))
 
                     # 量能分
                     if volumes is not None and len(volumes) >= 5:
                         late_vol = volumes[-5:].sum()
                         total_vol = volumes.sum()
-                        vol_ratio = late_vol / total_vol if total_vol > 0 else 0.5
-                        vol_score = min(100, max(0, vol_ratio * 200))
+                        vol_ratio_val = late_vol / total_vol if total_vol > 0 else 0.5
+                        vol_score = min(100, max(0, vol_ratio_val * 200))
                     else:
                         vol_score = 50
 
                     # 高开幅度分
                     auction_price = late_prices[-1]
                     gap_pct = (auction_price / prev_close - 1) * 100 if prev_close > 0 else 0
-                    if 2 <= gap_pct <= 5:
-                        gap_score = 90
-                    elif 0 <= gap_pct < 2:
-                        gap_score = 65
-                    elif 5 < gap_pct <= 7:
-                        gap_score = 50
-                    elif gap_pct > 7:
-                        gap_score = 20
-                    else:
-                        gap_score = 30
-
-                    auc_score = price_score * 0.35 + vol_score * 0.30 + gap_score * 0.35
-                    if auc_score >= 70:
-                        verdict = "✅ 竞价强势"
-                    elif auc_score >= 55:
-                        verdict = "⚠️ 竞价一般"
-                    else:
-                        verdict = "❌ 竞价偏弱"
-
-                    auction_data.append({
-                        "symbol": sym,
-                        "auction_price": f"{auction_price:.2f}",
-                        "auction_gap": f"{gap_pct:+.2f}%",
-                        "auction_score": round(auc_score, 1),
-                        "auction_detail": f"竞价:{auction_price:.2f}({gap_pct:+.2f}%) 价格:{price_score:.0f} 量能:{vol_score:.0f} 高开:{gap_score:.0f}",
-                        "auction_verdict": verdict,
-                    })
+                    data_source = "分钟竞价"
                 else:
-                    auction_data.append({"symbol": sym, "auction_gap": "N/A", "auction_score": 0, "auction_detail": "数据不足", "auction_verdict": "⚠️ 数据不足"})
-            else:
-                auction_data.append({"symbol": sym, "auction_gap": "N/A", "auction_score": 0, "auction_detail": "无数据", "auction_verdict": "⏳ 数据未出"})
-        except Exception as e:
-            auction_data.append({"symbol": sym, "auction_gap": "N/A", "auction_score": 0, "auction_detail": str(e)[:50], "auction_verdict": "⚠️ 获取失败"})
-            log(job_id, f"  ⚠ {sym} 竞价获取失败")
-        time.sleep(0.3)
+                    price_score = vol_score = 50
+                    auction_price = prev_close
+                    gap_pct = 0
+                    data_source = "分钟竞价(数据不全)"
+            except Exception:
+                price_score = vol_score = 50
+                auction_price = prev_close
+                gap_pct = 0
+                data_source = "分钟竞价(解析失败)"
+        else:
+            # ── 方案B: 用实时行情兜底 ──
+            spot = spot_lookup.get(sym, {})
+            spot_price = spot.get("price", 0)
 
-    # 合并
+            if spot_price > 0:
+                auction_price = spot_price
+                gap_pct = spot.get("pct", 0)  # 涨跌幅就是gap
+                data_source = "实时行情"
+
+                # 从spot数据估算竞价强度
+                # 价格趋势分: 基于涨跌幅
+                if gap_pct > 2:
+                    price_score = min(100, 50 + gap_pct * 8)
+                elif gap_pct > 0:
+                    price_score = 50 + gap_pct * 15
+                elif gap_pct > -2:
+                    price_score = 50 + gap_pct * 10
+                else:
+                    price_score = max(10, 50 + gap_pct * 5)
+
+                # 量能分: 基于成交额(竞价时段成交额小，开盘后大)
+                amt = spot.get("amount", 0)
+                if amt > 1e8:
+                    vol_score = min(100, 60 + amt / 1e7)
+                elif amt > 1e7:
+                    vol_score = 40 + amt / 1e6
+                else:
+                    vol_score = 30  # 竞价时段成交额可能很小
+            else:
+                auction_price = prev_close
+                gap_pct = 0
+                price_score = vol_score = 50
+                data_source = "无数据"
+
+        # ── 高开幅度评分 ──
+        if 2 <= gap_pct <= 5:
+            gap_score = 90
+        elif 0 <= gap_pct < 2:
+            gap_score = 65
+        elif 5 < gap_pct <= 7:
+            gap_score = 50
+        elif gap_pct > 7:
+            gap_score = 20
+        else:
+            gap_score = 30
+
+        auc_score = price_score * 0.35 + vol_score * 0.30 + gap_score * 0.35
+
+        if auc_score >= 70:
+            verdict = "✅ 竞价强势"
+        elif auc_score >= 55:
+            verdict = "⚠️ 竞价一般"
+        else:
+            verdict = "❌ 竞价偏弱"
+
+        auction_data.append({
+            "symbol": sym,
+            "auction_price": f"{auction_price:.2f}",
+            "auction_gap": f"{gap_pct:+.2f}%",
+            "auction_score": round(auc_score, 1),
+            "auction_detail": f"[{data_source}] 竞价:{auction_price:.2f}({gap_pct:+.2f}%) 价格:{price_score:.0f} 量能:{vol_score:.0f} 高开:{gap_score:.0f}",
+            "auction_verdict": verdict,
+        })
+        time.sleep(0.15)
+
+    # 合并到结果
     auc_lookup = {a["symbol"]: a for a in auction_data}
     balanced_final = _merge_auction(data.get("balanced", []), auc_lookup)
     aggressive_final = _merge_auction(data.get("aggressive", []), auc_lookup)
@@ -864,7 +957,7 @@ async function runClose() {
 
   // 动态超时：全A股3分钟，其他1分钟
   const sampleSize=document.getElementById('sampleSize').value;
-  const timeout=sampleSize==0?180000:60000;
+  const timeout=sampleSize==0?300000:90000;
   const ctrl=new AbortController();
   const timer=setTimeout(()=>ctrl.abort(),timeout);
 
